@@ -24,10 +24,11 @@ type Internals = {
   startStatsPolling: () => void
 }
 
-function created(input: { id: string; directory: string }): Event {
+function created(input: { id: string; directory: string; parentID?: string }): Event {
   return {
     type: "session.created",
     properties: {
+      sessionID: input.id,
       info: {
         id: input.id,
         slug: `${input.id}-slug`,
@@ -36,6 +37,7 @@ function created(input: { id: string; directory: string }): Event {
         title: "Session",
         version: "1",
         time: { created: 1, updated: 1 },
+        parentID: input.parentID,
       },
     },
   } as Event
@@ -65,10 +67,12 @@ function connection() {
     onProfileChanged: () => () => undefined,
     onMigrationComplete: () => () => undefined,
     onFavoritesChanged: () => () => undefined,
+    onModelSelectorExpandedChanged: () => () => undefined,
     registerDirectoryProvider: () => () => undefined,
     getServerInfo: () => ({ port: 12345 }),
     getServerConfig: () => ({ baseUrl: "http://127.0.0.1:12345", password: "test" }),
     getConnectionState: () => "connected" as const,
+    getConnectionError: () => null,
     resolveEventSessionId: (event: Event) => (event.type === "session.created" ? event.properties.info.id : undefined),
     recordMessageSessionId: () => undefined,
     notifyNotificationDismissed: () => undefined,
@@ -76,7 +80,7 @@ function connection() {
 }
 
 describe("KiloProvider follow-up sessions", () => {
-  it("adopts pending follow-up sessions for single-session views", async () => {
+  it("ignores subagents before adopting pending follow-up sessions", async () => {
     const service = connection()
     const provider = new KiloProvider({} as never, service as never)
     const internal = provider as unknown as Internals
@@ -108,6 +112,15 @@ describe("KiloProvider follow-up sessions", () => {
     internal.handleLoadMessages = async (sessionID: string) => {
       loaded.push(sessionID)
     }
+
+    service.emit(created({ id: "ses-child", directory: "/repo", parentID: "ses-parent" }))
+    await Promise.resolve()
+
+    expect(internal.currentSession).toBeNull()
+    expect(internal.trackedSessionIds.has("ses-child")).toBe(false)
+    expect(internal.pendingFollowup).not.toBeNull()
+    expect(loaded).toEqual([])
+    expect(sent).toEqual([])
 
     service.emit(created({ id: "ses-followup", directory: "/repo" }))
     await Promise.resolve()

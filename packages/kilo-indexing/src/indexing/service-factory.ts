@@ -1,10 +1,10 @@
-import type { Ignore } from "ignore"
 import path from "path"
 
 import { getDefaultModelId } from "./model-registry"
 import { resolveEmbeddingProfile } from "./embedding-profile"
 
 import { OpenAiEmbedder } from "./embedders/openai"
+import { KiloEmbedder } from "./embedders/kilo"
 import { CodeIndexOllamaEmbedder } from "./embedders/ollama"
 import { OpenAICompatibleEmbedder } from "./embedders/openai-compatible"
 import { GeminiEmbedder } from "./embedders/gemini"
@@ -22,10 +22,12 @@ import type { CacheManager } from "./cache-manager"
 import type { IndexingTelemetryMeta, IndexingTelemetryReporter } from "./interfaces/telemetry"
 import {
   BATCH_SEGMENT_THRESHOLD,
+  DEFAULT_VECTOR_STORE,
   OLLAMA_EMBEDDER_REQUEST_TIMEOUT_MS,
   REMOTE_EMBEDDER_VALIDATION_TIMEOUT_MS,
 } from "./constants"
 import { Log } from "../util/log"
+import type { IgnoreMatcher } from "./shared/load-ignore"
 
 const log = Log.create({ service: "indexing-factory" })
 
@@ -54,7 +56,7 @@ export class CodeIndexServiceFactory {
     const cfg = this.configManager.getConfig()
     return {
       provider: cfg.embedderProvider,
-      vectorStore: cfg.vectorStoreProvider ?? "qdrant",
+      vectorStore: cfg.vectorStoreProvider ?? DEFAULT_VECTOR_STORE,
       modelId: cfg.modelId,
     }
   }
@@ -63,6 +65,17 @@ export class CodeIndexServiceFactory {
     const config = this.configManager.getConfig()
     const provider = config.embedderProvider
 
+    if (provider === "kilo") {
+      if (!config.kiloOptions?.apiKey) throw new Error("Kilo API key is required for embedding.")
+      if (!config.modelId) throw new Error("Kilo embedding model is required.")
+      return new KiloEmbedder({
+        apiKey: config.kiloOptions.apiKey,
+        baseUrl: config.kiloOptions.baseUrl,
+        organizationId: config.kiloOptions.organizationId,
+        modelId: config.modelId,
+        dimensions: config.modelDimension,
+      })
+    }
     if (provider === "openai") {
       if (!config.openAiOptions?.apiKey) throw new Error("OpenAI API key is required for embedding.")
       return new OpenAiEmbedder(config.openAiOptions.apiKey, config.modelId)
@@ -72,8 +85,7 @@ export class CodeIndexServiceFactory {
       return new CodeIndexOllamaEmbedder(config.ollamaOptions.baseUrl, config.modelId, config.modelDimension)
     }
     if (provider === "openai-compatible") {
-      if (!config.openAiCompatibleOptions?.baseUrl || !config.openAiCompatibleOptions?.apiKey)
-        throw new Error("OpenAI-compatible base URL and API key are required.")
+      if (!config.openAiCompatibleOptions?.baseUrl) throw new Error("OpenAI-compatible base URL is required.")
       return new OpenAICompatibleEmbedder(
         config.openAiCompatibleOptions.baseUrl,
         config.openAiCompatibleOptions.apiKey,
@@ -157,7 +169,7 @@ export class CodeIndexServiceFactory {
     }
   }
 
-  public createVectorStore(): IVectorStore {
+  public createVectorStore(workspacePath = this.workspacePath): IVectorStore {
     const config = this.configManager.getConfig()
     const profile = resolveEmbeddingProfile(config.embedderProvider, config.modelId, config.modelDimension)
 
@@ -179,7 +191,7 @@ export class CodeIndexServiceFactory {
         vectorSize: profile.dimension,
         dbDir,
       })
-      return new LanceDBVectorStore(this.workspacePath, profile.dimension, dbDir, profile)
+      return new LanceDBVectorStore(workspacePath, profile.dimension, dbDir, profile)
     }
 
     if (!config.qdrantUrl) throw new Error("Qdrant URL is required.")
@@ -189,14 +201,14 @@ export class CodeIndexServiceFactory {
       model: profile.modelId,
       vectorSize: profile.dimension,
     })
-    return new QdrantVectorStore(this.workspacePath, config.qdrantUrl, profile.dimension, config.qdrantApiKey, profile)
+    return new QdrantVectorStore(workspacePath, config.qdrantUrl, profile.dimension, config.qdrantApiKey, profile)
   }
 
   public createDirectoryScanner(
     embedder: IEmbedder,
     vectorStore: IVectorStore,
     parser: ICodeParser,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): DirectoryScanner {
     const config = this.configManager.getConfig()
     const meta = this.getTelemetryMeta()
@@ -217,7 +229,7 @@ export class CodeIndexServiceFactory {
     embedder: IEmbedder,
     vectorStore: IVectorStore,
     cacheManager: CacheManager,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): IFileWatcher {
     const config = this.configManager.getConfig()
     const meta = this.getTelemetryMeta()
@@ -236,7 +248,7 @@ export class CodeIndexServiceFactory {
 
   public createServices(
     cacheManager: CacheManager,
-    ignoreInstance: Ignore,
+    ignoreInstance: IgnoreMatcher,
   ): {
     embedder: IEmbedder
     vectorStore: IVectorStore

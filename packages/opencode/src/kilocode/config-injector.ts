@@ -1,5 +1,5 @@
-import { Config } from "../config"
-import { ConfigPermission } from "../config"
+import { Config } from "../config/config"
+import { ConfigPermissionV1 as ConfigPermission } from "@opencode-ai/core/v1/config/permission"
 import { ModesMigrator } from "./modes-migrator"
 import { RulesMigrator } from "./rules-migrator"
 import { WorkflowsMigrator } from "./workflows-migrator"

@@ -9,36 +9,44 @@ import { afterEach, describe, expect, spyOn } from "bun:test"
 import { APICallError } from "ai"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
+import type { LLMEvent } from "@opencode-ai/llm"
+import { Database } from "@opencode-ai/core/database/database"
 import path from "path"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
-import { Config } from "../../src/config"
+import { Config } from "../../src/config/config"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
+import { Image } from "../../src/image/image"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
-import type { Provider } from "../../src/provider"
-import { ModelID, ProviderID } from "../../src/provider/schema"
-import { Session } from "../../src/session"
+import type { Provider } from "../../src/provider/provider"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { Reference } from "../../src/reference/reference"
+import { Session } from "../../src/session/session"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionRetry } from "../../src/session/retry"
-import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { MessageID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
-import { Log } from "../../src/util"
-import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
-import { provideTmpdirInstance } from "../fixture/fixture"
+import { SyncEvent } from "../../src/sync"
+import * as Log from "@opencode-ai/core/util/log"
+import * as CrossSpawnSpawner from "@opencode-ai/core/cross-spawn-spawner"
+import { provideTmpdirProject } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 Log.init({ print: false })
 
 const ref = {
-  providerID: ProviderID.make("test"),
-  modelID: ModelID.make("test-model"),
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
 }
 
-type Script = Stream.Stream<LLM.Event, unknown>
+type Script = Stream.Stream<LLMEvent, unknown>
 
 class TestLLM extends Context.Service<
   TestLLM,
@@ -96,7 +104,6 @@ const llm = Layer.unwrap(
             const item = queue.shift() ?? Stream.fail(new Error("unexpected extra llm call"))
             return item
           },
-          raw: () => Effect.die("raw not implemented in TestLLM"),
         }),
       ),
       Layer.succeed(TestLLM, TestLLM.of({ push, calls: Effect.sync(() => calls) })),
@@ -104,7 +111,14 @@ const llm = Layer.unwrap(
   }),
 )
 
-const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
+const reference = Layer.mock(Reference.Service)({
+  init: () => Effect.void,
+  list: () => Effect.succeed([]),
+  get: () => Effect.succeed(undefined),
+  ensure: () => Effect.void,
+  contains: () => Effect.succeed(false),
+})
+const status = Layer.mergeAll(SessionStatus.defaultLayer, Bus.layer)
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
 const deps = Layer.mergeAll(
   Session.defaultLayer,
@@ -113,11 +127,17 @@ const deps = Layer.mergeAll(
   Permission.defaultLayer,
   Plugin.defaultLayer,
   Config.defaultLayer,
+  RuntimeFlags.layer(),
+  reference,
   SessionSummary.defaultLayer,
+  Image.defaultLayer,
+  SyncEvent.defaultLayer,
+  EventV2Bridge.defaultLayer,
+  Database.defaultLayer,
   status,
   llm,
 ).pipe(Layer.provideMerge(infra))
-const env = SessionProcessor.layer.pipe(Layer.provideMerge(deps))
+const env = SessionProcessor.layer.pipe(Layer.provideMerge(deps), Layer.provide(reference))
 
 const it = testEffect(env)
 
@@ -129,7 +149,7 @@ describe("session processor retry limit", () => {
   it.live(
     "stops after two retries with the normalized retryable error",
     () =>
-      provideTmpdirInstance(
+      provideTmpdirProject(
         (dir) =>
           Effect.gen(function* () {
             process.env.KILO_SESSION_RETRY_LIMIT = "2"
@@ -187,7 +207,7 @@ describe("session processor retry limit", () => {
               tools: {},
             }
 
-            const expected = MessageV2.fromError(retryable429(), { providerID: ProviderID.make("test") })
+            const expected = MessageV2.fromError(retryable429(), { providerID: ProviderV2.ID.make("test") })
             try {
               const result = yield* handle.process(input)
               const calls = yield* test.calls
@@ -206,7 +226,7 @@ describe("session processor retry limit", () => {
 
   it.effect("only positive integers enable the limit", () =>
     Effect.promise(async () => {
-      const { Flag } = await import("../../src/flag/flag")
+      const { Flag } = await import("@opencode-ai/core/flag/flag")
 
       delete process.env.KILO_SESSION_RETRY_LIMIT
       expect(Flag.KILO_SESSION_RETRY_LIMIT).toBeUndefined()
@@ -227,7 +247,7 @@ describe("session processor retry limit", () => {
 
   it.effect("reads env at access time (dynamic getter)", () =>
     Effect.promise(async () => {
-      const { Flag } = await import("../../src/flag/flag")
+      const { Flag } = await import("@opencode-ai/core/flag/flag")
       delete process.env.KILO_SESSION_RETRY_LIMIT
       expect(Flag.KILO_SESSION_RETRY_LIMIT).toBeUndefined()
       process.env.KILO_SESSION_RETRY_LIMIT = "5"

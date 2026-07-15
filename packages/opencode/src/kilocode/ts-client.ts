@@ -3,16 +3,22 @@
 // instead of spawning a persistent typescript-language-server process.
 // This drops memory from ~500MB persistent to ~50MB peak (0 idle).
 
-import { LSPClient } from "../lsp"
+import { LSPClient } from "../lsp/client"
 import { Bus } from "../bus"
+import { BusEvent } from "../bus/bus-event"
 import { TsCheck } from "./ts-check"
-import { Log } from "../util"
+import * as Log from "@opencode-ai/core/util/log"
 import { withTimeout } from "../util/timeout"
 import path from "path"
-import { Instance } from "../project/instance"
+import { Instance } from "./instance"
+import { Schema } from "effect"
 
 export namespace TsClient {
   const log = Log.create({ service: "ts-client" })
+  const Diagnostics = BusEvent.define(
+    "lsp.client.diagnostics",
+    Schema.Struct({ serverID: Schema.String, path: Schema.String }),
+  )
 
   export function create(input: { root: string }): LSPClient.Info {
     const diagnostics = new Map<string, LSPClient.Diagnostic[]>()
@@ -30,7 +36,7 @@ export namespace TsClient {
             diagnostics.set(file, diags)
           }
           for (const file of result.keys()) {
-            Bus.publish(LSPClient.Event.Diagnostics, {
+            Bus.publish(Instance.current, Diagnostics, {
               path: file,
               serverID: client.serverID,
             })

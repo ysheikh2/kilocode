@@ -52,6 +52,15 @@ export const dict = {
   "ui.sessionTurn.error.freeUsageExceeded": "무료 사용량 초과",
   "ui.sessionTurn.error.addCredits": "크레딧 추가",
 
+  "dialog.usageExceeded.freeTier.title": "무료 한도에 도달했습니다",
+  "dialog.usageExceeded.freeTier.description":
+    "Kilo Go를 구독하여 최고의 오픈 소스 모델에 안정적으로 액세스하세요. 월 $5부터 시작합니다.",
+  "dialog.usageExceeded.freeTier.actionLabel": "구독",
+  "dialog.usageExceeded.accountRateLimit.title": "Go 한도에 도달했습니다",
+  "dialog.usageExceeded.accountRateLimit.description":
+    "사용량 한도에 도달했습니다. 지금 이 모델을 계속 사용하려면 사용 가능한 잔액에서 사용을 활성화하세요",
+  "dialog.usageExceeded.accountRateLimit.actionLabel": "설정 열기",
+
   "ui.sessionTurn.status.delegating": "작업 위임 중",
   "ui.sessionTurn.status.delegatingWaitingPermission": "Subagent waiting for permission",
   "ui.sessionTurn.status.delegatingWaitingQuestion": "Subagent waiting for response",
@@ -96,16 +105,28 @@ export const dict = {
   "ui.textField.copied": "복사됨",
 
   "ui.imagePreview.alt": "이미지 미리보기",
+  // kilocode_change start
+  "ui.mermaid.rendering": "Mermaid 다이어그램 렌더링 중...",
+  "ui.mermaid.renderError": "Mermaid 렌더링 실패: {{message}}",
+  "ui.mermaid.errorDefault": "Mermaid 다이어그램을 렌더링할 수 없습니다.",
+  "ui.mermaid.errorEmpty": "Mermaid가 빈 다이어그램을 렌더링했습니다.",
+  "ui.mermaid.download": "다운로드",
+  "ui.mermaid.copySource": "Mermaid 소스 복사",
+  "ui.mermaid.copySvg": "SVG 복사",
+  "ui.mermaid.copyPng": "PNG 복사",
+  "ui.mermaid.downloadSvg": "SVG 다운로드",
+  "ui.mermaid.downloadPng": "PNG 다운로드",
+  // kilocode_change end
   "ui.scrollView.ariaLabel": "스크롤 가능한 콘텐츠",
 
   "ui.tool.read": "읽기",
   "ui.tool.loaded": "로드됨",
+  "ui.tool.swePruned": "SWE-Pruner · {{total}}줄 중 {{kept}}줄 유지", // kilocode_change
   "ui.tool.list": "목록",
   "ui.tool.glob": "Glob",
   "ui.tool.grep": "Grep",
   "ui.tool.webfetch": "웹 가져오기",
   "ui.tool.websearch": "웹 검색",
-  "ui.tool.codesearch": "코드 검색",
   "ui.tool.shell": "셸",
   "ui.tool.patch": "패치",
   "ui.tool.todos": "할 일",
@@ -151,7 +172,9 @@ export const dict = {
   "ui.patch.action.patched": "패치됨",
 
   "ui.question.subtitle.answered": "{{count}}개 답변됨",
+  "ui.question.subtitle.dismissed": "{{count}} dismissed", // kilocode_change
   "ui.question.answer.none": "(답변 없음)",
+  "ui.question.answer.dismissed": "Dismissed", // kilocode_change
   "ui.question.review.notAnswered": "(답변되지 않음)",
   "ui.question.multiHint": "해당하는 항목 모두 선택",
   "ui.question.singleHint": "하나의 답변을 선택",

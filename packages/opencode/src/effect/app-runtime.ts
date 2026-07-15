@@ -1,28 +1,28 @@
 import { Layer, ManagedRuntime } from "effect"
 import { attach } from "./run-service"
-import * as Observability from "./observability"
+import * as Observability from "@opencode-ai/core/effect/observability"
 
-import { AppFileSystem } from "@opencode-ai/shared/filesystem"
-import { Bus } from "@/bus"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Database } from "@opencode-ai/core/database/database"
 import { Auth } from "@/auth"
 import { Account } from "@/account/account"
-import { Config } from "@/config"
+import { Config } from "@/config/config"
 import { Git } from "@/git"
-import { Ripgrep } from "@/file/ripgrep"
-import { File } from "@/file"
-import { FileWatcher } from "@/file/watcher"
-import { Storage } from "@/storage"
+import { Ripgrep } from "@opencode-ai/core/filesystem/ripgrep"
+import { Storage } from "@/storage/storage"
 import { Snapshot } from "@/snapshot"
 import { Plugin } from "@/plugin"
-import { Provider } from "@/provider"
-import { ProviderAuth } from "@/provider"
+import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { ModelCache } from "@/provider/model-cache" // kilocode_change
+import { Provider } from "@/provider/provider"
+import { ProviderAuth } from "@/provider/auth"
 import { Agent } from "@/agent/agent"
 import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Question } from "@/question"
 import { Permission } from "@/permission"
 import { Todo } from "@/session/todo"
-import { Session } from "@/session"
+import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
 import { SessionRunState } from "@/session/run-state"
 import { SessionProcessor } from "@/session/processor"
@@ -32,47 +32,67 @@ import { SessionSummary } from "@/session/summary"
 import { SessionPrompt } from "@/session/prompt"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
-import { LSP } from "@/lsp"
+import { LSP } from "@/lsp/lsp"
 import { MCP } from "@/mcp"
 import { McpAuth } from "@/mcp/auth"
 import { Command } from "@/command"
-import { Truncate } from "@/tool"
-import { ToolRegistry } from "@/tool"
+import { Truncate } from "@/tool/truncate"
+import { ToolRegistry } from "@/tool/registry"
 import { Format } from "@/format"
-import { Project } from "@/project"
-import { Vcs } from "@/project"
+import { InstanceLayer } from "@/project/instance-layer"
+import { Project } from "@/project/project"
+import { Vcs } from "@/project/vcs"
+import { Reference } from "@/reference/reference"
+import { Workspace } from "@/control-plane/workspace"
 import { Worktree } from "@/worktree"
-import { Pty } from "@/pty"
 import { Installation } from "@/installation"
-import { ShareNext } from "@/share"
-import { SessionShare } from "@/share"
-import { Npm } from "@/npm"
-import { memoMap } from "./memo-map"
+import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
+import { ShareNext } from "@/share/share-next"
+import { SessionShare } from "@/share/session"
+import { Npm } from "@opencode-ai/core/npm"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
+import { BackgroundJob } from "@/background/job"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Notebook } from "@/kilocode/notebook/service" // kilocode_change
+import { AgentManager } from "@/kilocode/agent-manager/service" // kilocode_change
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { ProjectV2 } from "@opencode-ai/core/project" // kilocode_change - listener routes are provided by AppLayer
+import { ProjectCopy } from "@opencode-ai/core/project/copy" // kilocode_change - listener routes are provided by AppLayer
+import { MoveSession } from "@opencode-ai/core/control-plane/move-session" // kilocode_change - listener routes are provided by AppLayer
+import { PtyTicket } from "@opencode-ai/core/pty/ticket" // kilocode_change - listener routes are provided by AppLayer
 
-export const AppLayer = Layer.mergeAll(
+const CoreLayer = Layer.mergeAll(
   Npm.defaultLayer,
-  AppFileSystem.defaultLayer,
-  Bus.defaultLayer,
+  FSUtil.defaultLayer,
+  Database.defaultLayer,
   Auth.defaultLayer,
   Account.defaultLayer,
   Config.defaultLayer,
   Git.defaultLayer,
   Ripgrep.defaultLayer,
-  File.defaultLayer,
-  FileWatcher.defaultLayer,
   Storage.defaultLayer,
   Snapshot.defaultLayer,
   Plugin.defaultLayer,
+  ModelCache.defaultLayer, // kilocode_change
+  ModelsDev.defaultLayer,
   Provider.defaultLayer,
   ProviderAuth.defaultLayer,
   Agent.defaultLayer,
   Skill.defaultLayer,
   Discovery.defaultLayer,
+)
+
+const SessionLayer = Layer.mergeAll(
+  AgentManager.defaultLayer, // kilocode_change
   Question.defaultLayer,
+  Notebook.defaultLayer, // kilocode_change
   Permission.defaultLayer,
   Todo.defaultLayer,
   Session.defaultLayer,
   SessionStatus.defaultLayer,
+  BackgroundJob.defaultLayer,
+  RuntimeFlags.defaultLayer,
+  EventV2Bridge.defaultLayer,
   SessionRunState.defaultLayer,
   SessionProcessor.defaultLayer,
   SessionCompaction.defaultLayer,
@@ -86,19 +106,36 @@ export const AppLayer = Layer.mergeAll(
   McpAuth.defaultLayer,
   Command.defaultLayer,
   Truncate.defaultLayer,
+)
+
+const FeatureLayer = Layer.mergeAll(
   ToolRegistry.defaultLayer,
   Format.defaultLayer,
   Project.defaultLayer,
+  ProjectV2.defaultLayer, // kilocode_change - satisfy listener route handlers through AppLayer
+  ProjectCopy.defaultLayer, // kilocode_change - satisfy listener route handlers through AppLayer
+  MoveSession.defaultLayer, // kilocode_change - satisfy listener route handlers through AppLayer
+  PtyTicket.defaultLayer, // kilocode_change - satisfy listener route handlers through AppLayer
   Vcs.defaultLayer,
-  Worktree.defaultLayer,
-  Pty.defaultLayer,
+  Reference.defaultLayer,
+  Workspace.defaultLayer,
+  Worktree.appLayer,
   Installation.defaultLayer,
+  MemoryService.layer, // kilocode_change
   ShareNext.defaultLayer,
   SessionShare.defaultLayer,
-).pipe(Layer.provideMerge(Observability.layer))
+)
+
+export const AppLayer = Layer.mergeAll(CoreLayer, SessionLayer, FeatureLayer).pipe(
+  Layer.provideMerge(InstanceLayer.layer),
+  Layer.provideMerge(Observability.layer),
+)
 
 const rt = ManagedRuntime.make(AppLayer, { memoMap })
 type Runtime = Pick<typeof rt, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">
+
+/** Services provided by AppRuntime — i.e. what an Effect run via AppRuntime.runPromise can yield. */
+export type AppServices = ManagedRuntime.ManagedRuntime.Services<typeof rt>
 const wrap = (effect: Parameters<typeof rt.runSync>[0]) => attach(effect as never) as never
 
 export const AppRuntime: Runtime = {

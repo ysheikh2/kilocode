@@ -52,6 +52,15 @@ export const dict = {
   "ui.sessionTurn.error.freeUsageExceeded": "Limite de uso gratuito excedido",
   "ui.sessionTurn.error.addCredits": "Adicionar créditos",
 
+  "dialog.usageExceeded.freeTier.title": "Limite gratuito atingido",
+  "dialog.usageExceeded.freeTier.description":
+    "Assine o Kilo Go para ter acesso confiável aos melhores modelos open-source, a partir de $5/mês.",
+  "dialog.usageExceeded.freeTier.actionLabel": "Assinar",
+  "dialog.usageExceeded.accountRateLimit.title": "Limite do Go atingido",
+  "dialog.usageExceeded.accountRateLimit.description":
+    "Limite de uso atingido. Para continuar usando este modelo agora, ative o uso a partir do seu saldo disponível",
+  "dialog.usageExceeded.accountRateLimit.actionLabel": "Abrir configurações",
+
   "ui.sessionTurn.status.delegating": "Delegando trabalho",
   "ui.sessionTurn.status.delegatingWaitingPermission": "Subagent waiting for permission",
   "ui.sessionTurn.status.delegatingWaitingQuestion": "Subagent waiting for response",
@@ -96,16 +105,28 @@ export const dict = {
   "ui.textField.copied": "Copiado",
 
   "ui.imagePreview.alt": "Visualização de imagem",
+  // kilocode_change start
+  "ui.mermaid.rendering": "Renderizando diagrama Mermaid...",
+  "ui.mermaid.renderError": "Falha ao renderizar Mermaid: {{message}}",
+  "ui.mermaid.errorDefault": "Não foi possível renderizar o diagrama Mermaid.",
+  "ui.mermaid.errorEmpty": "Mermaid renderizou um diagrama vazio.",
+  "ui.mermaid.download": "Baixar",
+  "ui.mermaid.copySource": "Copiar código Mermaid",
+  "ui.mermaid.copySvg": "Copiar SVG",
+  "ui.mermaid.copyPng": "Copiar PNG",
+  "ui.mermaid.downloadSvg": "Baixar SVG",
+  "ui.mermaid.downloadPng": "Baixar PNG",
+  // kilocode_change end
   "ui.scrollView.ariaLabel": "conteúdo rolável",
 
   "ui.tool.read": "Ler",
   "ui.tool.loaded": "Carregado",
+  "ui.tool.swePruned": "SWE-Pruner · {{kept}} de {{total}} linhas mantidas", // kilocode_change
   "ui.tool.list": "Listar",
   "ui.tool.glob": "Glob",
   "ui.tool.grep": "Grep",
   "ui.tool.webfetch": "Buscar Web",
   "ui.tool.websearch": "Pesquisa na Web",
-  "ui.tool.codesearch": "Pesquisa de Código",
   "ui.tool.shell": "Shell",
   "ui.tool.patch": "Patch",
   "ui.tool.todos": "Tarefas",
@@ -151,7 +172,9 @@ export const dict = {
   "ui.patch.action.patched": "Patch aplicado",
 
   "ui.question.subtitle.answered": "{{count}} respondidas",
+  "ui.question.subtitle.dismissed": "{{count}} dismissed", // kilocode_change
   "ui.question.answer.none": "(sem resposta)",
+  "ui.question.answer.dismissed": "Dismissed", // kilocode_change
   "ui.question.review.notAnswered": "(não respondida)",
   "ui.question.multiHint": "Selecione todas que se aplicam",
   "ui.question.singleHint": "Selecione uma resposta",

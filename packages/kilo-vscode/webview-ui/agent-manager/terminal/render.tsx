@@ -22,6 +22,11 @@ export interface TerminalTabRenderDeps {
   onSelect: (id: string) => void
   onMiddleClick: (id: string, e: MouseEvent) => void
   onClose: (id: string) => void
+  onCloseOthers: (id: string) => void
+  role?: "tab"
+  selected?: boolean
+  tabIndex?: number
+  onKeyDown?: JSX.EventHandlerUnion<HTMLDivElement, KeyboardEvent>
 }
 
 /** Render the terminal entry inside the agent-manager tab bar `<For>`. */
@@ -37,12 +42,17 @@ export function renderTerminalTab(deps: TerminalTabRenderDeps): JSX.Element {
       keybind={isActive() ? "" : deps.keybind()}
       closeKeybind={deps.closeKeybind()}
       active={isActive()}
+      role={deps.role}
+      selected={deps.selected}
+      tabIndex={deps.tabIndex}
+      onKeyDown={deps.onKeyDown}
       onSelect={() => deps.onSelect(deps.id)}
       onMiddleClick={(e: MouseEvent) => deps.onMiddleClick(deps.id, e)}
       onClose={(e: MouseEvent) => {
         e.stopPropagation()
         deps.onClose(deps.id)
       }}
+      onCloseOthers={() => deps.onCloseOthers(deps.id)}
     />
   )
 }
@@ -85,7 +95,7 @@ export function renderTerminalLayer(props: { state: TerminalStateControls }): JS
             const visible = () => slotVisible(term.id, term.contextKey)
             return (
               <div class={`am-terminal-slot ${visible() ? "am-terminal-slot-visible" : ""}`}>
-                <TerminalTab terminalId={term.id} wsUrl={term.wsUrl} active={visible()} />
+                <TerminalTab terminalId={term.id} wsUrl={term.wsUrl} active={visible()} font={term.font} />
               </div>
             )
           }}

@@ -10,7 +10,9 @@ import { remove as cleanup } from "./kilocode/cleanup" // kilocode_change
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
 await fs.mkdir(dir, { recursive: true })
 afterAll(async () => {
-  const { Database } = await import("../src/storage")
+  const { SessionExport } = await import("../src/kilocode/session-export") // kilocode_change
+  const { Database } = await import("../src/storage/db")
+  await SessionExport.shutdown() // kilocode_change
   Database.close()
   await cleanup(dir) // kilocode_change
 })
@@ -20,6 +22,8 @@ process.env["XDG_CACHE_HOME"] = path.join(dir, "cache")
 process.env["XDG_CONFIG_HOME"] = path.join(dir, "config")
 process.env["XDG_STATE_HOME"] = path.join(dir, "state")
 process.env["KILO_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtures", "models-api.json")
+process.env["KILO_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
+process.env["KILO_EXPERIMENTAL_WORKSPACES"] = "true"
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills
@@ -30,7 +34,6 @@ process.env["KILO_TEST_HOME"] = testHome
 // Set test managed config directory to isolate tests from system managed settings
 const testManagedConfigDir = path.join(dir, "managed")
 process.env["KILO_TEST_MANAGED_CONFIG_DIR"] = testManagedConfigDir
-process.env["KILO_DISABLE_DEFAULT_PLUGINS"] = "true"
 
 // Write the cache version file to prevent global/index.ts from clearing the cache
 const cacheDir = path.join(dir, "cache", "kilo")
@@ -60,13 +63,20 @@ delete process.env["CEREBRAS_API_KEY"]
 delete process.env["SAMBANOVA_API_KEY"]
 delete process.env["KILO_SERVER_PASSWORD"]
 delete process.env["KILO_SERVER_USERNAME"]
+delete process.env["KILO_EXPERIMENTAL"]
+delete process.env["KILO_ENABLE_EXPERIMENTAL_MODELS"]
+delete process.env["OTEL_EXPORTER_OTLP_ENDPOINT"]
+delete process.env["OTEL_EXPORTER_OTLP_HEADERS"]
+delete process.env["OTEL_RESOURCE_ATTRIBUTES"]
 
 // Use in-memory sqlite
 process.env["KILO_DB"] = ":memory:"
 
 // Now safe to import from src/
-const { Log } = await import("../src/util")
+const { Log } = await import("@opencode-ai/core/util/log")
 const { initProjectors } = await import("../src/server/projectors")
+// kilocode_change: bind the package memory effect layer to opencode for tests (paths/instance/log/events)
+const { installMemoryRuntime } = await import("../src/kilocode/memory/runtime") // kilocode_change
 
 void Log.init({
   print: false,
@@ -75,3 +85,4 @@ void Log.init({
 })
 
 initProjectors()
+installMemoryRuntime() // kilocode_change

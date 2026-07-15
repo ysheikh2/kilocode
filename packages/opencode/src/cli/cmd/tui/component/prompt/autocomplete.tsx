@@ -1,4 +1,4 @@
-import type { BoxRenderable, TextareaRenderable, KeyEvent, ScrollBoxRenderable } from "@opentui/core"
+import type { BoxRenderable, TextareaRenderable, ScrollBoxRenderable } from "@opentui/core"
 import { pathToFileURL } from "bun"
 import fuzzysort from "fuzzysort"
 import path from "path"
@@ -6,17 +6,22 @@ import { firstBy } from "remeda"
 import { createMemo, createResource, createEffect, onMount, onCleanup, Index, Show, createSignal } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useEditorContext } from "@tui/context/editor"
+import { useProject } from "@tui/context/project"
 import { useSDK } from "@tui/context/sdk"
 import { useSync } from "@tui/context/sync"
 import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../context/tui-config"
 import { useTheme, selectedForeground } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
-import { useCommandDialog } from "@tui/component/dialog-command"
 import { useTerminalDimensions } from "@opentui/solid"
-import { Locale } from "@/util"
+import { slashDisplay } from "@/kilocode/cli/cmd/command-display" // kilocode_change
+import { Locale } from "@/util/locale"
 import type { PromptInfo } from "./history"
 import { useFrecency } from "./frecency"
+import { useBindings, useCommandSlashes, useOpencodeModeStack } from "../../keymap"
+import { Reference } from "@/reference/reference"
+import { ConfigReference } from "@/config/reference"
+import { displayCharAt, mentionTriggerIndex } from "@/cli/cmd/prompt-display"
 
 function removeLineRange(input: string) {
   const hashIndex = input.lastIndexOf("#")
@@ -52,9 +57,8 @@ function extractLineRange(input: string) {
 
 export type AutocompleteRef = {
   onInput: (value: string) => void
-  onKeyDown: (e: KeyEvent) => void
+  // kilocode_change start - validate cursor moves and close overlays without mutating draft text
   onCursorChange: () => void
-  // kilocode_change start - let the prompt close autocomplete without mutating draft text
   dismiss: () => void
   // kilocode_change end
   visible: false | "@" | "/"
@@ -86,12 +90,13 @@ export function Autocomplete(props: {
   const editor = useEditorContext()
   const sdk = useSDK()
   const sync = useSync()
-  const command = useCommandDialog()
+  const project = useProject()
+  const slashes = useCommandSlashes()
+  const modeStack = useOpencodeModeStack()
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const frecency = useFrecency()
   const tuiConfig = useTuiConfig()
-
   const [store, setStore] = createStore({
     index: 0,
     selected: 0,
@@ -100,6 +105,12 @@ export function Autocomplete(props: {
   })
 
   const [positionTick, setPositionTick] = createSignal(0)
+
+  createEffect(() => {
+    if (!store.visible) return
+    const popMode = modeStack.push("autocomplete")
+    onCleanup(popMode)
+  })
 
   createEffect(() => {
     if (store.visible) {
@@ -162,7 +173,7 @@ export function Autocomplete(props: {
     const input = props.input()
     const currentCursorOffset = input.cursorOffset
 
-    const charAfterCursor = props.value.at(currentCursorOffset)
+    const charAfterCursor = displayCharAt(props.value, currentCursorOffset)
     const needsSpace = charAfterCursor !== " "
     const append = "@" + text + (needsSpace ? " " : "")
 
@@ -265,6 +276,38 @@ export function Autocomplete(props: {
     }
   }
 
+  function referencePromptText(reference: Reference.Resolved) {
+    const problem = reference.kind === "invalid" ? reference.message : undefined
+    return [
+      `Referenced configured reference @${reference.name}.`,
+      ...(reference.kind === "local" ? ["Kind: local directory"] : []),
+      ...(reference.kind === "git" ? ["Kind: git repository"] : []),
+      ...(reference.kind === "invalid" && reference.repository ? [`Repository: ${reference.repository}`] : []),
+      ...(reference.kind === "git" ? [`Repository: ${reference.repository}`] : []),
+      ...(reference.kind === "git" && reference.branch ? [`Branch/ref: ${reference.branch}`] : []),
+      ...(reference.kind === "invalid" ? [] : [`Reference root: ${reference.path}`]),
+      ...(problem
+        ? [`Problem: ${problem}`]
+        : ["Inspect the configured reference with Read, Glob, and Grep when useful."]),
+    ].join("\n")
+  }
+
+  const references = createMemo(() =>
+    Reference.resolveAll({
+      references: ConfigReference.normalize(sync.data.config.reference ?? {}),
+      directory: sync.path.directory || process.cwd(),
+      worktree: sync.path.worktree || sync.path.directory || process.cwd(),
+    }),
+  )
+
+  const referenceMatch = createMemo(() => {
+    if (!store.visible || store.visible === "/") return
+    const { baseQuery } = extractLineRange(search())
+    const slash = baseQuery.indexOf("/")
+    const alias = slash === -1 ? baseQuery : baseQuery.slice(0, slash)
+    return references().find((item) => item.name === alias)
+  })
+
   function normalizeMentionPath(filePath: string) {
     const baseDir = sync.path.directory || process.cwd()
     const absolute = path.resolve(filePath)
@@ -286,7 +329,6 @@ export function Autocomplete(props: {
     const { filename, part } = createFilePart(item, lineRange)
     const index = store.visible === "@" ? store.index : props.input().cursorOffset
 
-    command.keybinds(true)
     setStore("visible", false)
     setStore("index", index)
     insertPart(filename, part)
@@ -296,12 +338,14 @@ export function Autocomplete(props: {
     () => search(),
     async (query) => {
       if (!store.visible || store.visible === "/") return []
+      if (referenceMatch()) return []
 
       const { lineRange, baseQuery } = extractLineRange(query ?? "")
 
       // Get files from SDK
       const result = await sdk.client.find.files({
         query: baseQuery,
+        workspace: project.workspace.current(),
       })
 
       const options: AutocompleteOption[] = []
@@ -402,23 +446,54 @@ export function Autocomplete(props: {
       )
   })
 
+  const referenceAliases = createMemo(() =>
+    references().map(
+      (reference): AutocompleteOption => ({
+        display: "@" + reference.name,
+        description: reference.kind === "invalid" ? reference.message : " dir",
+        onSelect: () => {
+          if (reference.kind !== "invalid") {
+            insertPart(reference.name, {
+              type: "file",
+              mime: "application/x-directory",
+              filename: reference.name,
+              url: pathToFileURL(reference.path).href,
+              source: {
+                type: "file",
+                text: { start: 0, end: 0, value: "" },
+                path: reference.name,
+              },
+            })
+            return
+          }
+          insertPart(reference.name, {
+            type: "text",
+            text: referencePromptText(reference),
+            synthetic: true,
+          })
+        },
+      }),
+    ),
+  )
+
   const commands = createMemo((): AutocompleteOption[] => {
-    const results: AutocompleteOption[] = [...command.slashes()]
+    const results: AutocompleteOption[] = [...slashes()]
 
     for (const serverCommand of sync.data.command) {
-      if (serverCommand.source === "skill") continue
-      const label = serverCommand.source === "mcp" ? ":mcp" : ""
+      // kilocode_change start - preserve suffixes like :skill when inserting selected slash commands
+      const display = slashDisplay(serverCommand)
       results.push({
-        display: "/" + serverCommand.name + label,
+        display,
         description: serverCommand.description,
         onSelect: () => {
-          const newText = "/" + serverCommand.name + " "
+          const newText = display + " "
           const cursor = props.input().logicalCursor
           props.input().deleteRange(0, 0, cursor.row, cursor.col)
           props.input().insertText(newText)
           props.input().cursorOffset = Bun.stringWidth(newText)
         },
       })
+      // kilocode_change end
     }
 
     results.sort((a, b) => a.display.localeCompare(b.display))
@@ -433,11 +508,17 @@ export function Autocomplete(props: {
 
   const options = createMemo((prev: AutocompleteOption[] | undefined) => {
     const filesValue = files()
+    const referenceMatchValue = referenceMatch()
     const agentsValue = agents()
+    const referenceAliasesValue = referenceAliases()
     const commandsValue = commands()
 
     const mixed: AutocompleteOption[] =
-      store.visible === "@" ? [...agentsValue, ...(filesValue || []), ...mcpResources()] : [...commandsValue]
+      store.visible === "@"
+        ? referenceMatchValue
+          ? referenceAliasesValue.filter((item) => item.display === `@${referenceMatchValue.name}`)
+          : [...referenceAliasesValue, ...agentsValue, ...(filesValue || []), ...mcpResources()]
+        : [...commandsValue]
 
     const searchValue = search()
 
@@ -448,6 +529,8 @@ export function Autocomplete(props: {
     if (files.loading && prev && prev.length > 0) {
       return prev
     }
+
+    if (referenceMatchValue) return mixed
 
     const result = fuzzysort.go(removeLineRange(searchValue), mixed, {
       keys: [
@@ -510,7 +593,7 @@ export function Autocomplete(props: {
     const input = props.input()
     const currentCursorOffset = input.cursorOffset
 
-    const displayText = selected.display.trimEnd()
+    const displayText = (selected.value ?? selected.display).trimEnd()
     const path = displayText.startsWith("@") ? displayText.slice(1) : displayText
 
     input.cursorOffset = store.index
@@ -524,8 +607,80 @@ export function Autocomplete(props: {
     setStore("selected", 0)
   }
 
+  useBindings(() => ({
+    target: props.input,
+    enabled: () => Boolean(store.visible),
+    commands: [
+      {
+        name: "prompt.autocomplete.prev",
+        title: "Previous autocomplete item",
+        category: "Autocomplete",
+        run() {
+          setStore("input", "keyboard")
+          move(-1)
+        },
+      },
+      {
+        name: "prompt.autocomplete.next",
+        title: "Next autocomplete item",
+        category: "Autocomplete",
+        run() {
+          setStore("input", "keyboard")
+          move(1)
+        },
+      },
+      {
+        name: "prompt.autocomplete.hide",
+        title: "Hide autocomplete",
+        category: "Autocomplete",
+        run() {
+          hide()
+        },
+      },
+      {
+        name: "prompt.autocomplete.select",
+        title: "Select autocomplete item",
+        category: "Autocomplete",
+        run() {
+          select()
+        },
+      },
+      {
+        name: "prompt.autocomplete.complete",
+        title: "Complete autocomplete item",
+        category: "Autocomplete",
+        run() {
+          const selected = options()[store.selected]
+          if (selected?.isDirectory) {
+            expandDirectory()
+            return
+          }
+
+          select()
+        },
+      },
+    ],
+    bindings: [
+      ...tuiConfig.keybinds.gather("prompt.autocomplete", [
+        "prompt.autocomplete.prev",
+        "prompt.autocomplete.next",
+        "prompt.autocomplete.hide",
+        "prompt.autocomplete.select",
+        "prompt.autocomplete.complete",
+      ]),
+      // kilocode_change start - close stale suggestions while allowing normal cursor movement
+      {
+        key: "right",
+        fallthrough: true,
+        cmd: () => {
+          if (props.input().cursorOffset <= store.index) dismiss()
+        },
+      },
+      // kilocode_change end
+    ],
+  }))
+
   function show(mode: "@" | "/") {
-    command.keybinds(false)
     setStore({
       visible: mode,
       index: props.input().cursorOffset,
@@ -536,9 +691,9 @@ export function Autocomplete(props: {
   // but still allow normal autocomplete dismissal to clean it up.
   function dismiss() {
     if (!store.visible) return
-    command.keybinds(true)
     setStore("visible", false)
   }
+  // kilocode_change end
 
   function hide() {
     const text = props.input().plainText
@@ -550,9 +705,8 @@ export function Autocomplete(props: {
         draft.input = props.input().plainText
       })
     }
-    dismiss()
+    setStore("visible", false)
   }
-  // kilocode_change end
 
   onMount(() => {
     const unsubscribeMention = editor.onMention((mention) => {
@@ -599,94 +753,20 @@ export function Autocomplete(props: {
         }
 
         // Check for "@" trigger - find the nearest "@" before cursor with no whitespace between
-        const text = value.slice(0, offset)
-        const idx = text.lastIndexOf("@")
-        if (idx === -1) return
-
-        const between = text.slice(idx)
-        const before = idx === 0 ? undefined : value[idx - 1]
-        if ((before === undefined || /\s/.test(before)) && !between.match(/\s/)) {
+        const idx = mentionTriggerIndex(value, offset)
+        if (idx !== undefined) {
           show("@")
           setStore("index", idx)
         }
       },
-      onKeyDown(e: KeyEvent) {
-        if (store.visible) {
-          const name = e.name?.toLowerCase()
-          const ctrlOnly = e.ctrl && !e.meta && !e.shift
-          const isNavUp = name === "up" || (ctrlOnly && name === "p")
-          const isNavDown = name === "down" || (ctrlOnly && name === "n")
-
-          if (isNavUp) {
-            setStore("input", "keyboard")
-            move(-1)
-            e.preventDefault()
-            return
-          }
-          if (isNavDown) {
-            setStore("input", "keyboard")
-            move(1)
-            e.preventDefault()
-            return
-          }
-          if (name === "escape") {
-            hide()
-            e.preventDefault()
-            return
-          }
-          if (name === "return") {
-            select()
-            e.preventDefault()
-            return
-          }
-          if (name === "tab") {
-            const selected = options()[store.selected]
-            if (selected?.isDirectory) {
-              expandDirectory()
-            } else {
-              select()
-            }
-            e.preventDefault()
-            return
-          }
-          // kilocode_change start
-          if (name === "right") {
-            // Right arrow should not accept the suggestion when cursor is not
-            // within the filter region (not near where the suggestion is being added)
-            const cursor = props.input().cursorOffset
-            if (cursor <= store.index) {
-              hide()
-              // Don't preventDefault - let cursor move normally
-              return
-            }
-          }
-          // kilocode_change end
-        }
-        if (!store.visible) {
-          if (e.name === "@") {
-            const cursorOffset = props.input().cursorOffset
-            const charBeforeCursor =
-              cursorOffset === 0 ? undefined : props.input().getTextRange(cursorOffset - 1, cursorOffset)
-            const canTrigger = charBeforeCursor === undefined || charBeforeCursor === "" || /\s/.test(charBeforeCursor)
-            if (canTrigger) show("@")
-          }
-
-          if (e.name === "/") {
-            if (props.input().cursorOffset === 0) show("/")
-          }
-        }
-      },
-      // kilocode_change start
+      // kilocode_change start - dismiss stale popup after cursor leaves active filter region
       onCursorChange() {
         if (!store.visible) return
         const cursor = props.input().cursorOffset
         const value = props.input().plainText
         if (
-          // Cursor moved before the trigger
           cursor <= store.index ||
-          // There is a space between the trigger and the cursor
           props.input().getTextRange(store.index, cursor).match(/\s/) ||
-          // "/<command>" is not the sole content — dismiss slash popup once args are typed
           (store.visible === "/" && value.match(/^\S+\s+\S+\s*$/))
         ) {
           hide()

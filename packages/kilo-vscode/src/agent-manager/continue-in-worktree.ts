@@ -4,15 +4,18 @@ import type { WorktreeStateManager } from "./WorktreeStateManager"
 import { capture as captureGitState, apply as applyGitState, type GitSnapshot } from "./git-transfer"
 import { getErrorMessage } from "../kilo-provider-utils"
 import { PLATFORM } from "./constants"
+import { recordForkHandoff } from "./fork-handoff"
 
 export interface ContinueContext {
   root: string
   getClient: () => KiloClient
-  createWorktreeOnDisk: (opts: { baseBranch: string }) => Promise<{
+  createWorktreeOnDisk: (opts: { baseBranch: string; baseRef: string }) => Promise<{
     worktree: { id: string }
     result: CreateWorktreeResult
   } | null>
   runSetupScript: (path: string, branch: string, worktreeId: string) => Promise<void>
+  cleanupWorktree: (worktreeId: string) => Promise<void>
+  notifyError: (error: string, result: CreateWorktreeResult, worktreeId: string) => void
   getStateManager: () => WorktreeStateManager | undefined
   registerWorktreeSession: (sessionId: string, directory: string) => void
   registerSession: (session: Session) => void
@@ -50,8 +53,9 @@ export async function captureState(ctx: ContinueContext): Promise<StepResult<Git
 export async function prepareWorktree(
   ctx: ContinueContext,
   branch: string,
+  head: string,
 ): Promise<StepResult<{ worktreeId: string; result: CreateWorktreeResult }>> {
-  const created = await ctx.createWorktreeOnDisk({ baseBranch: branch })
+  const created = await ctx.createWorktreeOnDisk({ baseBranch: branch, baseRef: head })
   if (!created) return { ok: false, error: "Failed to create worktree" }
   await ctx.runSetupScript(created.result.path, created.result.branch, created.worktree.id)
   return { ok: true, value: { worktreeId: created.worktree.id, result: created.result } }
@@ -71,6 +75,23 @@ export async function transferState(
   return { ok: true, value: undefined }
 }
 
+async function rollback(
+  ctx: ContinueContext,
+  prepared: { worktreeId: string; result: CreateWorktreeResult },
+  error: string,
+  progress: (status: string, detail?: string, error?: string) => void,
+): Promise<void> {
+  await ctx.cleanupWorktree(prepared.worktreeId).catch((err) => {
+    ctx.log("Failed to clean up worktree after continue error:", getErrorMessage(err))
+  })
+  try {
+    ctx.notifyError(error, prepared.result, prepared.worktreeId)
+  } catch (err) {
+    ctx.log("Failed to notify Agent Manager about continue error:", getErrorMessage(err))
+  }
+  progress("error", undefined, error)
+}
+
 /** Fork the session into the worktree directory. */
 export async function forkSession(ctx: ContinueContext, sessionId: string, dir: string): Promise<StepResult<Session>> {
   let client: KiloClient
@@ -82,6 +103,9 @@ export async function forkSession(ctx: ContinueContext, sessionId: string, dir: 
   }
   try {
     const { data } = await client.session.fork({ sessionID: sessionId, directory: dir }, { throwOnError: true })
+    await recordForkHandoff({ client, sessionId: data.id, directory: dir }).catch((err) => {
+      ctx.log("Failed to record fork handoff:", getErrorMessage(err))
+    })
     return { ok: true, value: data }
   } catch (err) {
     return { ok: false, error: `Failed to fork session: ${getErrorMessage(err)}` }
@@ -127,12 +151,12 @@ export async function continueInWorktree(
   if (!captured.ok) return progress("error", undefined, captured.error)
 
   progress("creating", "Creating worktree...")
-  const prepared = await prepareWorktree(ctx, captured.value.branch)
+  const prepared = await prepareWorktree(ctx, captured.value.branch, captured.value.head)
   if (!prepared.ok) return progress("error", undefined, prepared.error)
 
   progress("transferring", "Transferring changes...")
   const transferred = await transferState(ctx, captured.value, prepared.value.result.path)
-  if (!transferred.ok) return progress("error", undefined, transferred.error)
+  if (!transferred.ok) return rollback(ctx, prepared.value, transferred.error, progress)
 
   progress("forking", "Starting session...")
   const forked = await forkSession(ctx, sessionId, prepared.value.result.path)

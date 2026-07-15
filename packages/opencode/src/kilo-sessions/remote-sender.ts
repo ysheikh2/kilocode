@@ -1,23 +1,29 @@
+import { RemoteModelCatalog } from "@/kilo-sessions/remote-model-catalog"
 import { RemoteProtocol } from "@/kilo-sessions/remote-protocol"
 import type { RemoteWS } from "@/kilo-sessions/remote-ws"
 import { GlobalBus } from "@/bus/global"
-// kilocode_change - AppRuntime is imported lazily inside dispatch() below to break a
-// module init cycle: Worktree → project/bootstrap → kilo-sessions → remote-sender →
-// app-runtime → Worktree. Static import here caused Worktree.defaultLayer to be
-// undefined when app-runtime evaluated during tests that import Worktree.
-import { Instance } from "@/project/instance"
-import { Session } from "@/session"
+import { Session } from "@/session/session"
+import type { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { Question } from "@/question"
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { Permission } from "@/permission"
-import { PermissionID } from "@/permission/schema"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { SessionID } from "@/session/schema"
 import { QuestionID } from "@/question/schema"
-import { ModelID, ProviderID } from "@/provider/schema"
-import { Log } from "@/util"
+import { Provider } from "@/provider/provider"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import z from "zod"
-import { zodObject } from "@/util/effect-zod"
+import { zodObject } from "@opencode-ai/core/effect-zod"
+import { Effect, Option, Schema } from "effect"
+
+type Provide = typeof import("@/kilocode/instance").provide
+
+async function provide<R>(input: { directory: string; fn: () => R }): Promise<R> {
+  const { provide } = await import("@/kilocode/instance")
+  return provide(input)
+}
 
 const QuestionData = z.object({
   requestID: z.string(),
@@ -35,27 +41,39 @@ const SuggestionData = z.object({
   index: z.number().int().nonnegative(),
 })
 
+const decodeSessionID = Schema.decodeUnknownOption(SessionID)
+
 // kilocode_change start — lazy init to avoid circular dependency
 // (Server → RemoteRoutes → RemoteSender → SessionPrompt at module load time)
+type RemotePromptInput = Omit<SessionPrompt.PromptInput, "model"> & {
+  model?: string | RemoteModelCatalog.ModelRef
+}
 let _remotePromptInput: z.ZodObject<any> | undefined
 function getRemotePromptInput() {
   return (_remotePromptInput ??= zodObject(SessionPrompt.PromptInput).extend({
-    model: z.string().optional(),
+    model: z.union([z.string(), RemoteModelCatalog.ModelRef]).optional(),
   }))
 }
 // kilocode_change end
-function normalizeModel(model: string | undefined) {
+function normalizeModel(model: string | RemoteModelCatalog.ModelRef | undefined) {
   if (!model) return undefined
+  if (typeof model !== "string") {
+    return {
+      providerID: ProviderV2.ID.make(model.providerID),
+      modelID: ModelV2.ID.make(model.modelID),
+    }
+  }
   return {
-    providerID: ProviderID.make("kilo"),
-    modelID: ModelID.make(model.startsWith("kilocode/") ? model.slice("kilocode/".length) : model),
+    providerID: ProviderV2.ID.make("kilo"),
+    modelID: ModelV2.ID.make(model.startsWith("kilocode/") ? model.slice("kilocode/".length) : model),
   }
 }
 
-function normalizePrompt(input: SessionPrompt.PromptInput & { model?: string }): SessionPrompt.PromptInput {
+function normalizePrompt(input: RemotePromptInput): SessionPrompt.PromptInput {
   return {
     ...input,
     model: normalizeModel(input.model),
+    ephemeralTools: { interactive_terminal: false },
   }
 }
 
@@ -69,7 +87,28 @@ export namespace RemoteSender {
       warn: (...args: any[]) => void
     }
     subscribe?: (callback: (event: any) => void) => () => void
-    provide?: typeof Instance.provide
+    provide?: Provide
+    permission?: {
+      readonly list: () => Promise<ReadonlyArray<Permission.Request>>
+      readonly reply: (input: Permission.ReplyInput) => Promise<void>
+    }
+    question?: {
+      readonly list: () => Promise<ReadonlyArray<Question.Request>>
+      readonly reply: (input: Parameters<Question.Interface["reply"]>[0]) => Promise<void>
+      readonly reject: (requestID: QuestionID) => Promise<void>
+    }
+    prompt?: (input: SessionPrompt.PromptInput) => Promise<unknown>
+    cancel?: (sessionID: SessionID) => Promise<void>
+    session?: {
+      readonly get: (sessionID: SessionID) => Promise<Session.Info>
+      readonly children: (sessionID: SessionID) => Promise<Session.Info[]>
+    }
+    catalog?: {
+      readonly get: (sessionID: SessionID) => Promise<Session.Info>
+      readonly messages: (sessionID: SessionID) => Promise<MessageV2.WithParts[]>
+      readonly providers: () => Promise<Record<ProviderV2.ID, Provider.Info>>
+      readonly default: () => Promise<RemoteModelCatalog.ModelRef | undefined>
+    }
   }
 
   export type Sender = {
@@ -81,6 +120,76 @@ export namespace RemoteSender {
     const sessions = new Set<string>()
     const children = new Map<string, string>() // childId → parentId
     let unsub: (() => void) | undefined
+    const permission = options.permission ?? {
+      list: async () => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Permission.Service.use((svc) => svc.list()))
+      },
+      reply: async (input: Permission.ReplyInput) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Permission.Service.use((svc) => svc.reply(input)))
+      },
+    }
+    const question = options.question ?? {
+      list: async () => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Question.Service.use((svc) => svc.list()))
+      },
+      reply: async (input: Parameters<Question.Interface["reply"]>[0]) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Question.Service.use((svc) => svc.reply(input)))
+      },
+      reject: async (requestID: QuestionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Question.Service.use((svc) => svc.reject(requestID)))
+      },
+    }
+    const prompt =
+      options.prompt ??
+      (async (input: SessionPrompt.PromptInput) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.prompt(input)))
+      })
+    const cancel =
+      options.cancel ??
+      (async (sessionID: SessionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.cancel(sessionID)))
+      })
+    const catalog = options.catalog ?? {
+      get: async (sessionID: SessionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Session.Service.use((svc) => svc.get(sessionID)))
+      },
+      messages: async (sessionID: SessionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(
+          Session.Service.use((svc) =>
+            svc
+              .findMessage(sessionID, (message) => message.info.role === "user" && !!message.info.model)
+              .pipe(Effect.map((message) => (Option.isSome(message) ? [message.value] : []))),
+          ),
+        )
+      },
+      providers: async () => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Provider.Service.use((svc) => svc.list()))
+      },
+      default: async () => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Provider.Service.use((svc) => svc.defaultModel()))
+      },
+    }
+    const session = options.session ?? {
+      get: async (sessionID: SessionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Session.Service.use((svc) => svc.get(sessionID)))
+      },
+      children: async (sessionID: SessionID) => {
+        const { AppRuntime } = await import("@/effect/app-runtime")
+        return AppRuntime.runPromise(Session.Service.use((svc) => svc.children(sessionID)))
+      },
+    }
 
     const sub =
       options.subscribe ??
@@ -93,7 +202,7 @@ export namespace RemoteSender {
       })
 
     async function directoryFor(sid: string): Promise<string> {
-      const info = await Session.get(SessionID.make(sid)).catch(() => undefined)
+      const info = await session.get(SessionID.make(sid)).catch(() => undefined)
       return info?.directory ?? options.directory
     }
 
@@ -110,10 +219,10 @@ export namespace RemoteSender {
     }
 
     async function backfillChildren(parentId: string) {
-      const provide = options.provide ?? Instance.provide
+      const run = options.provide ?? provide
       try {
         const dir = await directoryFor(parentId)
-        await provide({
+        await run({
           directory: dir,
           fn: async () => {
             await discoverChildren(parentId)
@@ -128,16 +237,18 @@ export namespace RemoteSender {
     // sees state that was asked before it connected — analogous to the Cloud
     // Agent's `connected` event carrying pending question/permission fields.
     async function replay(sessionId: string) {
+      const root = rootOf(sessionId)
       const [suggestions, questions, permissions] = await Promise.all([
         Suggestion.list(),
-        Question.list(),
-        Permission.list(),
+        question.list(),
+        permission.list(),
       ])
       for (const suggestion of suggestions) {
         if (suggestion.sessionID !== sessionId) continue
         options.conn.send({
           type: "event",
           sessionId,
+          ...(root ? { parentSessionId: root } : {}),
           event: "suggestion.shown",
           data: suggestion,
         })
@@ -147,6 +258,7 @@ export namespace RemoteSender {
         options.conn.send({
           type: "event",
           sessionId,
+          ...(root ? { parentSessionId: root } : {}),
           event: "question.asked",
           data: q,
         })
@@ -156,6 +268,7 @@ export namespace RemoteSender {
         options.conn.send({
           type: "event",
           sessionId,
+          ...(root ? { parentSessionId: root } : {}),
           event: "permission.asked",
           data: p,
         })
@@ -163,10 +276,10 @@ export namespace RemoteSender {
     }
 
     async function backfillPendingState(sessionId: string) {
-      const provide = options.provide ?? Instance.provide
+      const run = options.provide ?? provide
       try {
         const dir = await directoryFor(sessionId)
-        await provide({
+        await run({
           directory: dir,
           fn: () => replay(sessionId),
         })
@@ -176,7 +289,7 @@ export namespace RemoteSender {
     }
 
     async function discoverChildren(parentId: string) {
-      const childSessions = await Session.children(SessionID.make(parentId))
+      const childSessions = await session.children(SessionID.make(parentId))
       for (const child of childSessions) {
         children.set(child.id, parentId)
         const root = rootOf(child.id) ?? parentId
@@ -228,11 +341,11 @@ export namespace RemoteSender {
     }
 
     function dispatchLongRunning(msg: RemoteProtocol.Command, dir: Promise<string>, work: () => Promise<void>) {
-      const provide = options.provide ?? Instance.provide
+      const run = options.provide ?? provide
       options.conn.send({ type: "response", id: msg.id, result: {} })
       void (async () => {
         try {
-          await provide({ directory: await dir, fn: work })
+          await run({ directory: await dir, fn: work })
         } catch (e) {
           options.log.error("long-running command failed after ACK", {
             id: msg.id,
@@ -244,10 +357,10 @@ export namespace RemoteSender {
     }
 
     function dispatchQuick(msg: RemoteProtocol.Command, dir: Promise<string>, work: () => Promise<void>) {
-      const provide = options.provide ?? Instance.provide
+      const run = options.provide ?? provide
       void (async () => {
         try {
-          await provide({ directory: await dir, fn: work })
+          await run({ directory: await dir, fn: work })
           options.conn.send({ type: "response", id: msg.id, result: {} })
         } catch (e) {
           options.conn.send({ type: "response", id: msg.id, error: String(e) })
@@ -256,6 +369,48 @@ export namespace RemoteSender {
     }
 
     function dispatch(msg: RemoteProtocol.Command) {
+      if (msg.command === "list_models") {
+        const parsed = RemoteModelCatalog.Request.safeParse(msg.data)
+        const session = msg.sessionId ? decodeSessionID(msg.sessionId) : Option.none<SessionID>()
+        if (!parsed.success || Option.isNone(session)) {
+          options.conn.send({
+            type: "response",
+            id: msg.id,
+            error: "invalid list_models command",
+          })
+          return
+        }
+        const run = options.provide ?? provide
+        void (async () => {
+          try {
+            const info = await catalog.get(session.value)
+            const result = await run({
+              directory: info.directory,
+              fn: async () => {
+                const [providers, messages, fallback] = await Promise.all([
+                  catalog.providers(),
+                  catalog.messages(info.id),
+                  catalog.default().catch((err) => {
+                    options.log.warn("default model lookup failed", { error: String(err) })
+                    return undefined
+                  }),
+                ])
+                return RemoteModelCatalog.build({
+                  providers,
+                  session: info,
+                  messages,
+                  defaultModel: fallback,
+                })
+              },
+            })
+            options.conn.send({ type: "response", id: msg.id, result })
+          } catch {
+            options.log.error("list models command failed", { id: msg.id })
+            options.conn.send({ type: "response", id: msg.id, error: "failed to list models" })
+          }
+        })()
+        return
+      }
       if (msg.command === "send_message") {
         const parsed = getRemotePromptInput().safeParse(msg.data)
         if (!parsed.success) {
@@ -266,9 +421,8 @@ export namespace RemoteSender {
           })
           return
         }
-        const input = SessionPrompt.PromptInput.zod.safeParse(
-          normalizePrompt(parsed.data as SessionPrompt.PromptInput & { model?: string }),
-        )
+        const normalized = normalizePrompt(parsed.data as RemotePromptInput)
+        const input = SessionPrompt.PromptInput.zod.safeParse(normalized)
         if (!input.success) {
           options.conn.send({
             type: "response",
@@ -277,9 +431,23 @@ export namespace RemoteSender {
           })
           return
         }
-        dispatchLongRunning(msg, directoryFor(input.data.sessionID), async () => {
-          await SessionPrompt.prompt(input.data as SessionPrompt.PromptInput)
+        const promptInput = { ...input.data, ephemeralTools: normalized.ephemeralTools } as SessionPrompt.PromptInput
+        dispatchLongRunning(msg, directoryFor(promptInput.sessionID), async () => {
+          await prompt(promptInput)
         })
+        return
+      }
+      if (msg.command === "interrupt") {
+        const session = msg.sessionId ? decodeSessionID(msg.sessionId) : Option.none<SessionID>()
+        if (Option.isNone(session)) {
+          options.conn.send({
+            type: "response",
+            id: msg.id,
+            error: "invalid interrupt command",
+          })
+          return
+        }
+        dispatchQuick(msg, directoryFor(session.value), () => cancel(session.value))
         return
       }
       if (msg.command === "question_reply") {
@@ -294,7 +462,7 @@ export namespace RemoteSender {
         }
         const dir = msg.sessionId ? directoryFor(msg.sessionId) : Promise.resolve(options.directory)
         dispatchQuick(msg, dir, () =>
-          Question.reply({ ...parsed.data, requestID: QuestionID.make(parsed.data.requestID) }),
+          question.reply({ ...parsed.data, requestID: QuestionID.make(parsed.data.requestID) }),
         )
         return
       }
@@ -309,7 +477,7 @@ export namespace RemoteSender {
           return
         }
         const dir = msg.sessionId ? directoryFor(msg.sessionId) : Promise.resolve(options.directory)
-        dispatchQuick(msg, dir, () => Question.reject(QuestionID.make(parsed.data.requestID)))
+        dispatchQuick(msg, dir, () => question.reject(QuestionID.make(parsed.data.requestID)))
         return
       }
       if (msg.command === "suggestion_accept") {
@@ -357,12 +525,7 @@ export namespace RemoteSender {
         }
         const dir = msg.sessionId ? directoryFor(msg.sessionId) : Promise.resolve(options.directory)
         dispatchQuick(msg, dir, async () => {
-          const { AppRuntime } = await import("@/effect/app-runtime")
-          await AppRuntime.runPromise(
-            Permission.Service.use((svc) =>
-              svc.reply({ ...parsed.data, requestID: PermissionID.make(parsed.data.requestID) }),
-            ),
-          )
+          await permission.reply({ ...parsed.data, requestID: PermissionV1.ID.make(parsed.data.requestID) })
         })
         return
       }

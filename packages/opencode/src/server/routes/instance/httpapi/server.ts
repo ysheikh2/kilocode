@@ -1,139 +1,308 @@
-import { Effect, Layer, Redacted, Schema } from "effect"
-import { HttpApiBuilder, HttpApiMiddleware, HttpApiSecurity } from "effect/unstable/httpapi"
-import { HttpRouter, HttpServer, HttpServerRequest } from "effect/unstable/http"
-import { AppRuntime } from "@/effect/app-runtime"
-import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
-import { Observability } from "@/effect"
-import { Flag } from "@/flag/flag"
-import { InstanceBootstrap } from "@/project/bootstrap"
-import { Instance } from "@/project/instance"
+import { Config as EffectConfig, Context, Effect, Layer } from "effect"
+import { HttpApiBuilder, OpenApi } from "effect/unstable/httpapi"
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpMiddleware,
+  HttpRouter,
+  HttpServer,
+  HttpServerResponse,
+} from "effect/unstable/http"
+import * as Socket from "effect/unstable/socket/Socket"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Account } from "@/account/account"
+import { Agent } from "@/agent/agent"
+import { Auth } from "@/auth"
+import { BackgroundJob } from "@/background/job"
+import { Config } from "@/config/config"
+import { Command } from "@/command"
+import * as Observability from "@opencode-ai/core/effect/observability"
+import { Ripgrep } from "@opencode-ai/core/filesystem/ripgrep"
+import { Format } from "@/format"
+import { Git } from "@/git" // kilocode_change
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { LSP } from "@/lsp/lsp"
+import { MCP } from "@/mcp"
+import { Permission } from "@/permission"
+import { Installation } from "@/installation"
+import { InstanceLayer } from "@/project/instance-layer"
+import { Plugin } from "@/plugin"
+import { Project } from "@/project/project"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { ProjectCopy } from "@opencode-ai/core/project/copy"
+import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
+import { ProviderAuth } from "@/provider/auth"
+import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { ModelCache } from "@/provider/model-cache" // kilocode_change
+import { Provider } from "@/provider/provider"
+import { PtyTicket } from "@opencode-ai/core/pty/ticket"
+import { Question } from "@/question"
+import { Notebook } from "@/kilocode/notebook/service" // kilocode_change
+import { AgentManager } from "@/kilocode/agent-manager/service" // kilocode_change
+import { KiloViewers } from "@/kilocode/presence/service" // kilocode_change
+import { Session } from "@/session/session"
+import { SessionCompaction } from "@/session/compaction"
+import { LLM } from "@/session/llm"
+import { SessionPrompt } from "@/session/prompt"
+import { SessionRevert } from "@/session/revert"
+import { SessionRunState } from "@/session/run-state"
+import { SessionStatus } from "@/session/status"
+import { SessionSummary } from "@/session/summary"
+import { Todo } from "@/session/todo"
+import { SessionShare } from "@/share/session"
+import { ShareNext } from "@/share/share-next"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
+import { Database } from "@opencode-ai/core/database/database"
+import { Skill } from "@/skill"
+import { Snapshot } from "@/snapshot"
+import { Storage } from "@/storage/storage" // kilocode_change
+import { SyncEvent } from "@/sync"
+import { ToolRegistry } from "@/tool/registry"
 import { lazy } from "@/util/lazy"
-import { Filesystem } from "@/util"
-import { ConfigApi, configHandlers } from "./config"
-import { PermissionApi, permissionHandlers } from "./permission"
-import { ProjectApi, projectHandlers } from "./project"
-import { ProviderApi, providerHandlers } from "./provider"
-import { QuestionApi, questionHandlers } from "./question"
-import { WorkspaceApi, workspaceHandlers } from "./workspace"
-import { memoMap } from "@/effect/memo-map"
+import { Vcs } from "@/project/vcs"
+import { Worktree } from "@/worktree"
+import { Workspace } from "@/control-plane/workspace"
+import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
+import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
+import { serveUIEffect } from "@/server/shared/ui"
+import { ServerAuth } from "@/server/auth"
+import { InstanceHttpApi, RootHttpApi } from "./api"
+import { V2Api } from "@opencode-ai/server/api"
+import { PublicApi } from "./public"
+import {
+  authorizationLayer,
+  authorizationRouterMiddleware,
+  ptyConnectAuthorizationLayer,
+  v2AuthorizationLayer,
+} from "./middleware/authorization"
+import { EventApi } from "./groups/event"
+import { PtyConnectApi } from "./groups/pty"
+import { eventHandlers } from "./handlers/event"
+import { configHandlers } from "./handlers/config"
+import { controlHandlers } from "./handlers/control"
+import { controlPlaneHandlers } from "./handlers/control-plane"
+import { experimentalHandlers } from "./handlers/experimental"
+import { fileHandlers } from "./handlers/file"
+import { globalHandlers } from "./handlers/global"
+import { instanceHandlers } from "./handlers/instance"
+import { mcpHandlers } from "./handlers/mcp"
+import { permissionHandlers } from "./handlers/permission"
+import { projectHandlers } from "./handlers/project"
+import { projectCopyHandlers } from "./handlers/project-copy"
+import { providerHandlers } from "./handlers/provider"
+import { ptyConnectHandlers, ptyHandlers } from "./handlers/pty"
+import { questionHandlers } from "./handlers/question"
+import { sessionHandlers } from "./handlers/session"
+import { syncHandlers } from "./handlers/sync"
+import { tuiHandlers } from "./handlers/tui"
+import { v2Handlers } from "@opencode-ai/server/handlers"
+import { schemaErrorLayer as v2SchemaErrorLayer } from "@opencode-ai/server/middleware/schema-error"
+import { workspaceHandlers } from "./handlers/workspace"
+// kilocode_change start
+import {
+  provide as provideKiloHttpApiHandlers,
+  provideListener as provideKiloListenerRoutes,
+} from "@/kilocode/server/httpapi/server"
+// kilocode_change end
+import { instanceContextLayer } from "./middleware/instance-context"
+import { workspaceRoutingLayer } from "./middleware/workspace-routing"
+import { disposeMiddleware } from "./lifecycle"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
+import { compressionLayer } from "./middleware/compression"
+import { corsVaryFix } from "./middleware/cors-vary"
+import { errorLayer } from "./middleware/error"
+import { fenceLayer } from "./middleware/fence"
+import { schemaErrorLayer } from "./middleware/schema-error"
 
-const Query = Schema.Struct({
-  directory: Schema.optional(Schema.String),
-  workspace: Schema.optional(Schema.String),
-  auth_token: Schema.optional(Schema.String),
-})
+export const context = Context.makeUnsafe<unknown>(new Map())
 
-const Headers = Schema.Struct({
-  authorization: Schema.optional(Schema.String),
-  "x-kilo-directory": Schema.optional(Schema.String),
-})
+const cors = (corsOptions?: CorsOptions) =>
+  HttpRouter.middleware(
+    HttpMiddleware.cors({
+      allowedOrigins: (origin) => isAllowedCorsOrigin(origin, corsOptions),
+      maxAge: 86_400,
+    }),
+    { global: true },
+  )
 
-function decode(input: string) {
-  try {
-    return decodeURIComponent(input)
-  } catch {
-    return input
-  }
+// Route tree:
+// - rootApiRoutes: typed /global/* and control routes; auth is declared by RootHttpApi.
+// - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
+// - ptyConnectApiRoutes: typed WebSocket upgrade route with ticket-aware auth.
+// - instanceApiRoutes: remaining typed instance routes.
+// - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
+const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
+const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
+const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
+const v2HttpApiAuthLayer = v2AuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
+const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
+const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
+  Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
+  Layer.provide(schemaErrorLayer),
+  Layer.provide(httpApiAuthLayer),
+)
+const eventApiRoutes = HttpApiBuilder.layer(EventApi).pipe(
+  Layer.provide(eventHandlers),
+  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
+)
+const ptyConnectApiRoutes = HttpApiBuilder.layer(PtyConnectApi).pipe(
+  Layer.provide(ptyConnectHandlers),
+  Layer.provide([ptyConnectHttpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
+)
+const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
+  Layer.provide([
+    configHandlers,
+    experimentalHandlers,
+    fileHandlers,
+    instanceHandlers,
+    mcpHandlers,
+    projectHandlers,
+    projectCopyHandlers,
+    ptyHandlers,
+    questionHandlers,
+    permissionHandlers,
+    providerHandlers,
+    sessionHandlers,
+    syncHandlers,
+    tuiHandlers,
+    workspaceHandlers,
+  ]),
+  provideKiloHttpApiHandlers, // kilocode_change
+)
+
+const instanceRoutes = instanceApiRoutes.pipe(
+  Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer, schemaErrorLayer]),
+)
+const v2Routes = HttpApiBuilder.layer(V2Api).pipe(
+  Layer.provide(v2Handlers),
+  Layer.provide([v2HttpApiAuthLayer, v2SchemaErrorLayer]),
+)
+
+// `OpenApi.fromApi` is non-trivial; defer until /doc is actually hit so
+// processes that never serve it (CLI, scripts) don't pay at module load.
+// `HttpServerResponse.jsonUnsafe` runs JSON.stringify eagerly, so caching
+// the response also caches the serialized body — every /doc request reuses
+// the same Uint8Array instead of re-stringifying the spec.
+const docResponse = lazy(() => HttpServerResponse.jsonUnsafe(OpenApi.fromApi(PublicApi)))
+
+const docRoute = HttpRouter.use((router) => router.add("GET", "/doc", () => Effect.succeed(docResponse()))).pipe(
+  Layer.provide(authOnlyRouterLayer),
+)
+
+const uiRoute = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    const client = yield* HttpClient.HttpClient
+    const flags = yield* RuntimeFlags.Service
+    yield* router.add("*", "/*", (request) =>
+      serveUIEffect(request, { fs, client, disableEmbeddedWebUi: flags.disableEmbeddedWebUi }),
+    )
+  }),
+).pipe(Layer.provide(authOnlyRouterLayer))
+
+type RouteRequirements =
+  | HttpRouter.HttpRouter
+  | HttpRouter.Request<"Error", unknown>
+  | HttpRouter.Request<"GlobalError", unknown>
+  | HttpRouter.Request<"Requires", unknown>
+  | HttpRouter.Request<"GlobalRequires", never>
+
+export function createRoutes(
+  corsOptions?: CorsOptions,
+): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
+  return Layer.mergeAll(
+    rootApiRoutes,
+    eventApiRoutes,
+    ptyConnectApiRoutes,
+    instanceRoutes,
+    v2Routes,
+    docRoute,
+    uiRoute,
+  ).pipe(
+    Layer.provide([
+      errorLayer,
+      compressionLayer,
+      corsVaryFix,
+      fenceLayer.pipe(Layer.provide(Database.defaultLayer)),
+      cors(corsOptions),
+      Database.defaultLayer,
+      Account.defaultLayer,
+      Agent.defaultLayer,
+      Auth.defaultLayer,
+      BackgroundJob.defaultLayer,
+      Command.defaultLayer,
+      Config.defaultLayer,
+      Format.defaultLayer,
+      Git.defaultLayer, // kilocode_change
+      LSP.defaultLayer,
+      MemoryService.layer, // kilocode_change
+      LLM.defaultLayer,
+      Installation.defaultLayer,
+      MCP.defaultLayer,
+      ModelCache.defaultLayer, // kilocode_change
+      ModelsDev.defaultLayer,
+      Permission.defaultLayer,
+      Plugin.defaultLayer,
+      Project.defaultLayer,
+      ProjectV2.defaultLayer,
+      ProjectCopy.defaultLayer,
+      MoveSession.defaultLayer,
+      ProviderAuth.defaultLayer,
+      Provider.defaultLayer,
+      PtyTicket.defaultLayer,
+      Question.defaultLayer,
+      AgentManager.defaultLayer, // kilocode_change
+      Notebook.defaultLayer, // kilocode_change
+      KiloViewers.defaultLayer, // kilocode_change
+      Ripgrep.defaultLayer,
+      RuntimeFlags.defaultLayer,
+      Session.defaultLayer,
+      SessionCompaction.defaultLayer,
+      SessionPrompt.defaultLayer,
+      SessionRevert.defaultLayer,
+      SessionShare.defaultLayer,
+      SessionRunState.defaultLayer,
+      SessionStatus.defaultLayer,
+      SessionSummary.defaultLayer,
+      ShareNext.defaultLayer,
+      Snapshot.defaultLayer,
+      Storage.defaultLayer, // kilocode_change
+      SyncEvent.defaultLayer,
+      EventV2Bridge.defaultLayer,
+      EventV2.defaultLayer,
+      Skill.defaultLayer,
+      Todo.defaultLayer,
+      ToolRegistry.defaultLayer,
+      Vcs.defaultLayer,
+      Workspace.defaultLayer,
+      Worktree.appLayer,
+      FSUtil.defaultLayer,
+      FetchHttpClient.layer,
+      HttpServer.layerServices,
+    ]),
+    Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
+    Layer.provide(InstanceLayer.layer),
+    Layer.provide(Observability.layer),
+  )
 }
 
-class Unauthorized extends Schema.TaggedErrorClass<Unauthorized>()(
-  "Unauthorized",
-  { message: Schema.String },
-  { httpApiStatus: 401 },
-) {}
+// kilocode_change start - keep listener routes local while application services come from AppRuntime
+export function createListenerRoutes(corsOptions?: CorsOptions) {
+  return Layer.mergeAll(rootApiRoutes, eventApiRoutes, ptyConnectApiRoutes, instanceRoutes, docRoute, uiRoute).pipe(
+    provideKiloListenerRoutes(corsOptions),
+  )
+}
+// kilocode_change end
 
-class Authorization extends HttpApiMiddleware.Service<Authorization>()("@opencode/ExperimentalHttpApiAuthorization", {
-  error: Unauthorized,
-  security: {
-    basic: HttpApiSecurity.basic,
-  },
-}) {}
-
-const normalize = HttpRouter.middleware()(
-  Effect.gen(function* () {
-    return (effect) =>
-      Effect.gen(function* () {
-        const query = yield* HttpServerRequest.schemaSearchParams(Query)
-        if (!query.auth_token) return yield* effect
-        const req = yield* HttpServerRequest.HttpServerRequest
-        const next = req.modify({
-          headers: {
-            ...req.headers,
-            authorization: `Basic ${query.auth_token}`,
-          },
-        })
-        return yield* effect.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, next))
-      })
-  }),
-).layer
-
-const auth = Layer.succeed(
-  Authorization,
-  Authorization.of({
-    basic: (effect, { credential }) =>
-      Effect.gen(function* () {
-        if (!Flag.KILO_SERVER_PASSWORD) return yield* effect
-
-        const user = Flag.KILO_SERVER_USERNAME ?? "opencode"
-        if (credential.username !== user) {
-          return yield* new Unauthorized({ message: "Unauthorized" })
-        }
-        if (Redacted.value(credential.password) !== Flag.KILO_SERVER_PASSWORD) {
-          return yield* new Unauthorized({ message: "Unauthorized" })
-        }
-        return yield* effect
-      }),
-  }),
-)
-
-const instance = HttpRouter.middleware()(
-  Effect.gen(function* () {
-    return (effect) =>
-      Effect.gen(function* () {
-        const query = yield* HttpServerRequest.schemaSearchParams(Query)
-        const headers = yield* HttpServerRequest.schemaHeaders(Headers)
-        const raw = query.directory || headers["x-kilo-directory"] || process.cwd()
-        const workspace = query.workspace || undefined
-        const ctx = yield* Effect.promise(() =>
-          Instance.provide({
-            directory: Filesystem.resolve(decode(raw)),
-            init: () => AppRuntime.runPromise(InstanceBootstrap),
-            fn: () => Instance.current,
-          }),
-        )
-
-        const next = workspace ? effect.pipe(Effect.provideService(WorkspaceRef, workspace)) : effect
-        return yield* next.pipe(Effect.provideService(InstanceRef, ctx))
-      })
-  }),
-).layer
-
-const QuestionSecured = QuestionApi.middleware(Authorization)
-const PermissionSecured = PermissionApi.middleware(Authorization)
-const ProjectSecured = ProjectApi.middleware(Authorization)
-const ProviderSecured = ProviderApi.middleware(Authorization)
-const ConfigSecured = ConfigApi.middleware(Authorization)
-const WorkspaceSecured = WorkspaceApi.middleware(Authorization)
-
-export const routes = Layer.mergeAll(
-  HttpApiBuilder.layer(ConfigSecured).pipe(Layer.provide(configHandlers)),
-  HttpApiBuilder.layer(ProjectSecured).pipe(Layer.provide(projectHandlers)),
-  HttpApiBuilder.layer(QuestionSecured).pipe(Layer.provide(questionHandlers)),
-  HttpApiBuilder.layer(PermissionSecured).pipe(Layer.provide(permissionHandlers)),
-  HttpApiBuilder.layer(ProviderSecured).pipe(Layer.provide(providerHandlers)),
-  HttpApiBuilder.layer(WorkspaceSecured).pipe(Layer.provide(workspaceHandlers)),
-).pipe(
-  Layer.provide(auth),
-  Layer.provide(normalize),
-  Layer.provide(instance),
-  Layer.provide(HttpServer.layerServices),
-  Layer.provideMerge(Observability.layer),
-)
+export const routes = createRoutes()
 
 export const webHandler = lazy(() =>
   HttpRouter.toWebHandler(routes, {
+    disableLogger: true,
     memoMap,
+    middleware: disposeMiddleware,
   }),
 )
 
-export * as ExperimentalHttpApiServer from "./server"
+export * as HttpApiApp from "./server"
